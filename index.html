@@ -5,73 +5,53 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:#fff; font-family: sans-serif; }
-  #hidden-containers { display: none; }
+  /* Hide the widget so the user doesn't see the pages flashing/changing */
+  #results-container { display: none; }
 </style>
 </head>
 <body>
 
-<div id="hidden-containers">
-  <div id="web-target"></div>
-  <div id="image-target"></div>
-</div>
+<div id="results-container"></div>
 
 <script>
 const params = new URLSearchParams(location.search);
 const query  = params.get('q') || '';
 
-let compiledWebItems = [];
-let compiledImageItems = [];
-let webDone = false;
-let imageDone = false;
+// --- CONFIGURATION ---
+const TARGET_RESULTS = 25; // How many results you want to compile
+const MAX_PAGES_TO_CLICK = 5; // Failsafe: Don't click more than 5 times
+const WAIT_TIME_MS = 800; // How long to wait for Google to load the next page
 
 window.__gcse = {
   parsetags: 'explicit',
   initializationCallback: function() {
     if (!query) return;
 
-    // 1. Web Search Node Configuration
     google.search.cse.element.render({
-      div: 'web-target',
+      div: 'results-container',
       tag: 'searchresults-only',
       attributes: {
         queryParameterName: 'q',
         autoSearchOnLoad: true,
-        // "filtered_cse" tells Google to maximize results up to the UI ceiling limit per request
-        webSearchResultSetSize: 'filtered_cse' 
-      }
-    });
-
-    // 2. Image Search Node Configuration
-    google.search.cse.element.render({
-      div: 'image-target',
-      tag: 'searchresults-only',
-      attributes: {
-        queryParameterName: 'q',
-        autoSearchOnLoad: true,
-        defaultToImageSearch: true,
-        imageSearchResultSetSize: 'filtered_cse'
+        webSearchResultSetSize: 'filtered_cse' // Maximize results per page
       }
     });
 
     setTimeout(() => {
       try {
-        const webEl = google.search.cse.element.getElement('web-target');
-        if (webEl) webEl.execute(query);
-        
-        const imgEl = google.search.cse.element.getElement('image-target');
-        if (imgEl) imgEl.execute(query);
-      } catch(e) {
-        console.error("Error executing parallel search:", e);
-      }
+        const el = google.search.cse.element.getElement('results-container');
+        if (el) el.execute(query);
+      } catch(e) {}
     }, 400);
   }
 };
 
-function harvestWeb() {
-  const container = document.getElementById('web-target');
+// ── DOM Harvester ──────────────────────────────────────────────
+function harvestCurrentPage() {
   const items = [];
-  
-  container.querySelectorAll('.gsc-result').forEach(r => {
+  const images = [];
+
+  document.querySelectorAll('.gsc-result').forEach(r => {
     let href = '';
     let title = '';
     const titleA = r.querySelector('.gs-title a');
@@ -81,66 +61,80 @@ function harvestWeb() {
     }
     const snippet = r.querySelector('.gs-snippet')?.textContent?.trim() || '';
     if (href && title && href.startsWith('http')) {
+      // Prevent duplicates by checking if we already grabbed it on a previous page
       items.push({ href, title, snippet });
     }
   });
-  return items;
-}
 
-function harvestImages() {
-  const container = document.getElementById('image-target');
-  const images = [];
-
-  container.querySelectorAll('.gs-image, .gsc-thumbnail img, .gs-image-box img, .gsc-webResult img').forEach(img => {
+  document.querySelectorAll('.gs-image, .gsc-thumbnail img, .gs-image-box img').forEach(img => {
     const src = img.getAttribute('data-src') || img.src || '';
     const alt = img.alt || img.title || '';
-    if (src && src.startsWith('http') && !images.some(i => i.url === src)) {
-      images.push({ url: src, caption: alt });
-    }
+    if (src && src.startsWith('http')) images.push({ url: src, caption: alt });
   });
-  return images;
+
+  return { items, images };
 }
 
-let attempts = 0;
-const MAX_ATTEMPTS = 45; 
+// ── Async Auto-Paginator ───────────────────────────────────────
+async function runAutoPaginator() {
+  let compiledItems = [];
+  let compiledImages = [];
+  let currentPageIndex = 1;
 
-function pollParallel() {
-  attempts++;
+  // Helper to wait for network/DOM
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-  if (!webDone) {
-    const webResults = harvestWeb();
-    if (webResults.length > 0) {
-      compiledWebItems = webResults;
-      webDone = true;
+  // Loop through pages
+  while (currentPageIndex <= MAX_PAGES_TO_CLICK) {
+    // Wait for the current page to finish rendering
+    await sleep(WAIT_TIME_MS); 
+
+    const { items, images } = harvestCurrentPage();
+    
+    // Add new unique items to our master lists
+    items.forEach(item => {
+      if (!compiledItems.find(i => i.href === item.href)) compiledItems.push(item);
+    });
+    images.forEach(img => {
+      if (!compiledImages.find(i => i.url === img.url)) compiledImages.push(img);
+    });
+
+    // Check if we hit our target
+    if (compiledItems.length >= TARGET_RESULTS || items.length === 0) {
+      break; 
+    }
+
+    // Find the next page button in Google's pagination UI
+    currentPageIndex++;
+    let nextButtonContainer = document.querySelector('.gsc-cursor');
+    
+    if (nextButtonContainer) {
+      // Find the specific page number block (e.g., "2", "3")
+      let pages = Array.from(nextButtonContainer.querySelectorAll('.gsc-cursor-page'));
+      let nextBtn = pages.find(p => p.textContent.trim() == currentPageIndex);
+
+      if (nextBtn) {
+        nextBtn.click(); // Programmatically click "Next Page"
+      } else {
+        break; // No more pages exist for this query
+      }
+    } else {
+      break; // Pagination UI didn't load
     }
   }
 
-  if (!imageDone) {
-    const imageResults = harvestImages();
-    if (imageResults.length > 0) {
-      compiledImageItems = imageResults;
-      imageDone = true;
-    }
-  }
-
-  // Fallback condition: If we've given it some time (15 attempts) and at least one channel found content, accept it
-  if ((webDone && imageDone) || (attempts >= 15 && (webDone || imageDone)) || attempts >= MAX_ATTEMPTS) {
-    
-    window.parent.postMessage({
-      type:   'cse-results',
-      query:  query,
-      items:  compiledWebItems, 
-      images: compiledImageItems // All limitations entirely removed
-    }, '*');
-    
-    return;
-  }
-
-  setTimeout(pollParallel, 400);
+  // --- DONE! Send payload to parent ---
+  window.parent.postMessage({
+    type:   'cse-results',
+    query:  query,
+    items:  compiledItems,
+    images: compiledImages
+  }, '*');
 }
 
+// Start the crawler sequence
 if (query) {
-  setTimeout(pollParallel, 1000);
+  setTimeout(runAutoPaginator, 1500); // Give initial page a head start to load
 }
 </script>
 
