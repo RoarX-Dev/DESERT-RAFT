@@ -18,7 +18,7 @@ const query  = params.get('q') || '';
 // Inject query into URL hash so CSE auto-searches
 if (query) {
   // Google Hosted Search reads gsc.q from the hash
-  history.replaceState(null, '', location.pathname + location.search + '#gsc.tab=0&gsc.q=' + encodeURIComponent(query));
+  history.replaceState(null, '', location.pathname + location.search + '#gsc.tab=1&gsc.q=' + encodeURIComponent(query));
 }
 
 window.__gcse = {
