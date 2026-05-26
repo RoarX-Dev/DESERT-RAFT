@@ -3,75 +3,109 @@
 <head>
 <meta charset="UTF-8">
 <style>
-  body { margin: 0; background: transparent; }
-  .gcse-searchresults-only { display: none; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#fff; }
 </style>
 </head>
 <body>
 
-<!-- The CSE element — results-only, auto-searches on load via ?q= param -->
-<div class="gcse-searchresults-only"
-     data-autoSearchOnLoad="true"
-     data-queryParameterName="q">
-</div>
+<div id="results"></div>
 
 <script>
-// 1. Read the query from ?q=... in the URL
 const params = new URLSearchParams(location.search);
 const query  = params.get('q') || '';
-const tabMode = params.get('tab') || '0'; // 0=web, 1=images
 
-// 2. Set up the Google CSE callback intercept BEFORE cse.js loads
+// Inject query into URL hash so CSE auto-searches
+if (query) {
+  // Google Hosted Search reads gsc.q from the hash
+  history.replaceState(null, '', location.pathname + location.search + '#gsc.tab=0&gsc.q=' + encodeURIComponent(query));
+}
+
 window.__gcse = {
   parsetags: 'explicit',
-  callback: function() {
-    // Find the rendered element and attach a MutationObserver
-    // to catch results as Google injects them into the DOM
-    const el = document.querySelector('.gsc-results-wrapper-nooverlay, .gsc-results-wrapper-overlay, .gcse-searchresults-only');
-    if (!el) return;
-
-    const observer = new MutationObserver(() => {
-      const items = [];
-      const images = [];
-
-      // Web results
-      document.querySelectorAll('.gsc-result').forEach(r => {
-        const titleEl = r.querySelector('.gs-title a, .gs-title');
-        const href = titleEl?.href || titleEl?.getAttribute('data-ctorig') || '';
-        const title = titleEl?.textContent?.trim() || '';
-        const snippet = r.querySelector('.gs-snippet')?.textContent?.trim() || '';
-        if (href && title) items.push({ href, title, snippet });
-      });
-
-      // Image results (tab=1)
-      document.querySelectorAll('.gs-image-box img, .gsc-thumbnail img').forEach(img => {
-        const src = img.src || img.getAttribute('data-src') || '';
-        const alt = img.alt || '';
-        if (src && src.startsWith('http')) images.push({ url: src, caption: alt });
-      });
-
-      if (items.length > 0 || images.length > 0) {
-        window.parent.postMessage({
-          type: 'cse-results',
-          query: query,
-          items: items,
-          images: images.slice(0, 6)
-        }, '*');
-        observer.disconnect(); // fire once
+  initializationCallback: function() {
+    google.search.cse.element.render({
+      div: 'results',
+      tag: 'searchresults-only',
+      attributes: {
+        queryParameterName: 'q',
+        autoSearchOnLoad: true,
       }
     });
 
-    observer.observe(el, { childList: true, subtree: true });
-
-    // Kick off the actual search now
-    google.search.cse.element.render({
-      div: el,
-      tag: 'searchresults-only',
-      gname: 'gsearch'
-    });
-    google.search.cse.element.getElement('gsearch').prefillQuery(query, true);
+    // After render, execute the search
+    setTimeout(() => {
+      try {
+        const el = google.search.cse.element.getElement('results');
+        if (el) el.execute(query);
+      } catch(e) {}
+    }, 800);
   }
 };
+
+// ── Poll for results ──────────────────────────────────────────────
+let attempts = 0;
+const MAX = 40; // 40 × 400ms = 16 seconds max
+
+function harvest() {
+  const items = [];
+  const images = [];
+
+  document.querySelectorAll('.gsc-result').forEach(r => {
+    // Title + href
+    let href = '';
+    let title = '';
+    const titleA = r.querySelector('.gs-title a');
+    if (titleA) {
+      href  = titleA.getAttribute('data-ctorig') || titleA.href || '';
+      title = titleA.textContent.trim();
+    }
+    const snippet = r.querySelector('.gs-snippet')?.textContent?.trim() || '';
+    if (href && title && href.startsWith('http')) {
+      items.push({ href, title, snippet });
+    }
+  });
+
+  // Thumbnail images from result cards
+  document.querySelectorAll('.gs-image, .gsc-thumbnail img, .gs-image-box img').forEach(img => {
+    const src = img.getAttribute('data-src') || img.src || '';
+    const alt = img.alt || '';
+    if (src && src.startsWith('http')) images.push({ url: src, caption: alt });
+  });
+
+  return { items, images };
+}
+
+function poll() {
+  attempts++;
+  const { items, images } = harvest();
+
+  if (items.length > 0) {
+    window.parent.postMessage({
+      type:   'cse-results',
+      query:  query,
+      items:  items,
+      images: images.slice(0, 6)
+    }, '*');
+    return; // done
+  }
+
+  if (attempts >= MAX) {
+    // Send empty so Ruminance doesn't hang forever
+    window.parent.postMessage({
+      type:   'cse-results',
+      query:  query,
+      items:  [],
+      images: images.slice(0, 6)
+    }, '*');
+    return;
+  }
+
+  setTimeout(poll, 400);
+}
+
+// Start polling after a short head-start for CSE JS to boot
+setTimeout(poll, 1200);
 </script>
 
 <script async src="https://cse.google.com/cse.js?cx=6580aa8b33a2748cb"></script>
