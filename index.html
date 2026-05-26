@@ -3,56 +3,79 @@
 <head>
 <meta charset="UTF-8">
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:#fff; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#fff; font-family: sans-serif; }
+  /* Keep widgets hidden so the scraping happens invisibly behind the scenes */
+  #hidden-containers { display: none; }
 </style>
 </head>
 <body>
 
-<div id="results"></div>
+<div id="hidden-containers">
+  <div id="web-target"></div>
+  <div id="image-target"></div>
+</div>
 
 <script>
 const params = new URLSearchParams(location.search);
 const query  = params.get('q') || '';
 
-// Inject query into URL hash so CSE auto-searches
-if (query) {
-  // Google Hosted Search reads gsc.q from the hash
-  history.replaceState(null, '', location.pathname + location.search + '#gsc.tab=1&gsc.q=' + encodeURIComponent(query));
-}
+// Master result buckets to compile parallel data
+let compiledWebItems = [];
+let compiledImageItems = [];
+let webDone = false;
+let imageDone = false;
 
 window.__gcse = {
   parsetags: 'explicit',
   initializationCallback: function() {
+    if (!query) return;
+
+    // 1. Initialize Web Search Element (tabs=0 behavior)
     google.search.cse.element.render({
-      div: 'results',
+      div: 'web-target',
       tag: 'searchresults-only',
       attributes: {
         queryParameterName: 'q',
         autoSearchOnLoad: true,
+        resultSetSize: 20 // Forces Google CSE to load 20 results per page
       }
     });
 
-    // After render, execute the search
+    // 2. Initialize Image Search Element (tabs=1 / Image Search behavior)
+    google.search.cse.element.render({
+      div: 'image-target',
+      tag: 'searchresults-only',
+      attributes: {
+        queryParameterName: 'q',
+        autoSearchOnLoad: true,
+        defaultToImageSearch: true, // Forces this container into Image Search Mode
+        resultSetSize: 20 // Forces 20 results per page
+      }
+    });
+
+    // Execute both searches instantly in parallel
     setTimeout(() => {
       try {
-        const el = google.search.cse.element.getElement('results');
-        if (el) el.execute(query);
-      } catch(e) {}
-    }, 800);
+        const webEl = google.search.cse.element.getElement('web-target');
+        if (webEl) webEl.execute(query);
+        
+        const imgEl = google.search.cse.element.getElement('image-target');
+        if (imgEl) imgEl.execute(query);
+      } catch(e) {
+        console.error("Error executing parallel search:", e);
+      }
+    }, 400);
   }
 };
 
-// ── Poll for results ──────────────────────────────────────────────
-let attempts = 0;
-const MAX = 40; // 40 × 400ms = 16 seconds max
+// ── Parallel Harvesting Engines ───────────────────────────────────
 
-function harvest() {
+function harvestWeb() {
+  const container = document.getElementById('web-target');
   const items = [];
-  const images = [];
-
-  document.querySelectorAll('.gsc-result').forEach(r => {
-    // Title + href
+  
+  container.querySelectorAll('.gsc-result').forEach(r => {
     let href = '';
     let title = '';
     const titleA = r.querySelector('.gs-title a');
@@ -65,47 +88,71 @@ function harvest() {
       items.push({ href, title, snippet });
     }
   });
+  return items;
+}
 
-  // Thumbnail images from result cards
-  document.querySelectorAll('.gs-image, .gsc-thumbnail img, .gs-image-box img').forEach(img => {
+function harvestImages() {
+  const container = document.getElementById('image-target');
+  const images = [];
+
+  // Scrapes image results out of the image specific container
+  container.querySelectorAll('.gs-image, .gsc-thumbnail img, .gs-image-box img, .gsc-webResult img').forEach(img => {
     const src = img.getAttribute('data-src') || img.src || '';
-    const alt = img.alt || '';
-    if (src && src.startsWith('http')) images.push({ url: src, caption: alt });
+    const alt = img.alt || img.title || '';
+    if (src && src.startsWith('http') && !images.some(i => i.url === src)) {
+      images.push({ url: src, caption: alt });
+    }
   });
-
-  return { items, images };
+  return images;
 }
 
-function poll() {
+// ── Polling & Coordination Link ──────────────────────────────────
+let attempts = 0;
+const MAX_ATTEMPTS = 40; // 40 * 400ms = 16 seconds maximum wait timeout
+
+function pollParallel() {
   attempts++;
-  const { items, images } = harvest();
 
-  if (items.length > 0) {
+  // Check Web Results status
+  if (!webDone) {
+    const webResults = harvestWeb();
+    if (webResults.length > 0) {
+      compiledWebItems = webResults;
+      webDone = true;
+    }
+  }
+
+  // Check Image Results status
+  if (!imageDone) {
+    const imageResults = harvestImages();
+    if (imageResults.length > 0) {
+      compiledImageItems = imageResults;
+      imageDone = true;
+    }
+  }
+
+  // Break condition: Both components finished, OR timeout reached
+  if ((webDone && imageDone) || attempts >= MAX_ATTEMPTS) {
+    
+    // Limits removed: Passing all gathered elements cleanly 
     window.parent.postMessage({
       type:   'cse-results',
       query:  query,
-      items:  items,
-      images: images.slice(0, 6)
+      items:  compiledWebItems, // Contains up to 20 text results forced by resultSetSize
+      images: compiledImageItems // Contains ALL harvested images (No .slice(0,6) limit)
     }, '*');
-    return; // done
+    
+    return; // Termination
   }
 
-  if (attempts >= MAX) {
-    // Send empty so Ruminance doesn't hang forever
-    window.parent.postMessage({
-      type:   'cse-results',
-      query:  query,
-      items:  [],
-      images: images.slice(0, 6)
-    }, '*');
-    return;
-  }
-
-  setTimeout(poll, 400);
+  // Continue checking every 400ms
+  setTimeout(pollParallel, 400);
 }
 
-// Start polling after a short head-start for CSE JS to boot
-setTimeout(poll, 1200);
+// Kickstart parallel listener monitoring
+if (query) {
+  setTimeout(pollParallel, 1000);
+}
 </script>
 
 <script async src="https://cse.google.com/cse.js?cx=6580aa8b33a2748cb"></script>
