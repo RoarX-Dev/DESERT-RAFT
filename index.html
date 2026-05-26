@@ -1,6 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Load JSON.txt to Textarea</title>
+</head>
 <body>
-         <div class="-auto-continue">Auto continue in <span id="auto-continue-delay" class="-auto-continue-delay">120</span> seconds</div> 
-<script async src="https://cse.google.com/cse.js?cx=6580aa8b33a2748cb">
-</script>
-<div class="gcse-searchresults-only"></div>
-    </body>
+
+  <!-- Textarea to display the file contents -->
+  <textarea id="jsonOutput" rows="20" cols="80" placeholder="File content will appear here..."></textarea>
+  <br>
+  <button onclick="loadExternalFile()">Load File</button>
+
+  <script>
+    async function loadExternalFile() {
+      // Replace this with the URL to your .json.txt file
+      const fileUrl = 'https://cse.google.com/cse/element/v1?rsz=filtered_cse&num=10&hl=en&source=gcsc&cselibv=dc329f57de078f5d&cx=6580aa8b33a2748cb&q=why&safe=off&cse_tok=AEXjvhLCLQBfcfwjKR34QqjYMt63:1779798648549&lr=&cr=&gl=&filter=0&sort=&as_oq=&as_sitesearch=&exp=cc,apo&callback=google.search.cse.api14082&rurl=https://pass9018.w3spaces.com/index.html?q=why/json.txt'; 
+
+      try {
+        const response = await fetch(fileUrl);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+        
+        // Get the file text
+        const textData = await response.text();
+        
+        // Populate the textarea
+        document.getElementById('jsonOutput').value = textData;
+        
+      } catch (error) {
+        console.error('Failed to load the file:', error);
+        alert('Could not load file. Ensure the URL is correct and CORS is enabled.');
+      }
+    }
+  </script>
+</body>
+</html>
