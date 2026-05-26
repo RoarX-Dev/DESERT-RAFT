@@ -5,7 +5,6 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:#fff; font-family: sans-serif; }
-  /* Keep widgets hidden so the scraping happens invisibly behind the scenes */
   #hidden-containers { display: none; }
 </style>
 </head>
@@ -20,7 +19,6 @@
 const params = new URLSearchParams(location.search);
 const query  = params.get('q') || '';
 
-// Master result buckets to compile parallel data
 let compiledWebItems = [];
 let compiledImageItems = [];
 let webDone = false;
@@ -31,30 +29,30 @@ window.__gcse = {
   initializationCallback: function() {
     if (!query) return;
 
-    // 1. Initialize Web Search Element (tabs=0 behavior)
+    // 1. Web Search Node Configuration
     google.search.cse.element.render({
       div: 'web-target',
       tag: 'searchresults-only',
       attributes: {
         queryParameterName: 'q',
         autoSearchOnLoad: true,
-        resultSetSize: 20 // Forces Google CSE to load 20 results per page
+        // "filtered_cse" tells Google to maximize results up to the UI ceiling limit per request
+        webSearchResultSetSize: 'filtered_cse' 
       }
     });
 
-    // 2. Initialize Image Search Element (tabs=1 / Image Search behavior)
+    // 2. Image Search Node Configuration
     google.search.cse.element.render({
       div: 'image-target',
       tag: 'searchresults-only',
       attributes: {
         queryParameterName: 'q',
         autoSearchOnLoad: true,
-        defaultToImageSearch: true, // Forces this container into Image Search Mode
-        resultSetSize: 20 // Forces 20 results per page
+        defaultToImageSearch: true,
+        imageSearchResultSetSize: 'filtered_cse'
       }
     });
 
-    // Execute both searches instantly in parallel
     setTimeout(() => {
       try {
         const webEl = google.search.cse.element.getElement('web-target');
@@ -68,8 +66,6 @@ window.__gcse = {
     }, 400);
   }
 };
-
-// ── Parallel Harvesting Engines ───────────────────────────────────
 
 function harvestWeb() {
   const container = document.getElementById('web-target');
@@ -95,7 +91,6 @@ function harvestImages() {
   const container = document.getElementById('image-target');
   const images = [];
 
-  // Scrapes image results out of the image specific container
   container.querySelectorAll('.gs-image, .gsc-thumbnail img, .gs-image-box img, .gsc-webResult img').forEach(img => {
     const src = img.getAttribute('data-src') || img.src || '';
     const alt = img.alt || img.title || '';
@@ -106,14 +101,12 @@ function harvestImages() {
   return images;
 }
 
-// ── Polling & Coordination Link ──────────────────────────────────
 let attempts = 0;
-const MAX_ATTEMPTS = 40; // 40 * 400ms = 16 seconds maximum wait timeout
+const MAX_ATTEMPTS = 45; 
 
 function pollParallel() {
   attempts++;
 
-  // Check Web Results status
   if (!webDone) {
     const webResults = harvestWeb();
     if (webResults.length > 0) {
@@ -122,7 +115,6 @@ function pollParallel() {
     }
   }
 
-  // Check Image Results status
   if (!imageDone) {
     const imageResults = harvestImages();
     if (imageResults.length > 0) {
@@ -131,25 +123,22 @@ function pollParallel() {
     }
   }
 
-  // Break condition: Both components finished, OR timeout reached
-  if ((webDone && imageDone) || attempts >= MAX_ATTEMPTS) {
+  // Fallback condition: If we've given it some time (15 attempts) and at least one channel found content, accept it
+  if ((webDone && imageDone) || (attempts >= 15 && (webDone || imageDone)) || attempts >= MAX_ATTEMPTS) {
     
-    // Limits removed: Passing all gathered elements cleanly 
     window.parent.postMessage({
       type:   'cse-results',
       query:  query,
-      items:  compiledWebItems, // Contains up to 20 text results forced by resultSetSize
-      images: compiledImageItems // Contains ALL harvested images (No .slice(0,6) limit)
+      items:  compiledWebItems, 
+      images: compiledImageItems // All limitations entirely removed
     }, '*');
     
-    return; // Termination
+    return;
   }
 
-  // Continue checking every 400ms
   setTimeout(pollParallel, 400);
 }
 
-// Kickstart parallel listener monitoring
 if (query) {
   setTimeout(pollParallel, 1000);
 }
