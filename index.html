@@ -5,7 +5,6 @@
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body { background:#fff; font-family: sans-serif; }
-  /* Hide the widget so the user doesn't see the pages flashing/changing */
   #results-container { display: none; }
 </style>
 </head>
@@ -18,9 +17,12 @@ const params = new URLSearchParams(location.search);
 const query  = params.get('q') || '';
 
 // --- CONFIGURATION ---
-const TARGET_RESULTS = 25; // How many results you want to compile
-const MAX_PAGES_TO_CLICK = 5; // Failsafe: Don't click more than 5 times
-const WAIT_TIME_MS = 800; // How long to wait for Google to load the next page
+const TARGET_WEB_RESULTS  = 25;  // Max web results to compile
+const TARGET_IMG_RESULTS  = 30;  // Max image results to compile
+const MAX_WEB_PAGES       = 5;   // Max web pagination clicks
+const MAX_IMG_PAGES       = 5;   // Max image pagination clicks
+const PAGE_WAIT_MS        = 900; // Wait after each page click
+const TAB_SWITCH_WAIT_MS  = 1400;// Wait after switching to image tab (needs longer to render)
 
 window.__gcse = {
   parsetags: 'explicit',
@@ -33,7 +35,7 @@ window.__gcse = {
       attributes: {
         queryParameterName: 'q',
         autoSearchOnLoad: true,
-        webSearchResultSetSize: 'filtered_cse' // Maximize results per page
+        webSearchResultSetSize: 'filtered_cse'
       }
     });
 
@@ -46,95 +48,141 @@ window.__gcse = {
   }
 };
 
-// ── DOM Harvester ──────────────────────────────────────────────
-function harvestCurrentPage() {
-  const items = [];
-  const images = [];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ── Harvest web results from current page ──────────────────────
+function harvestWebPage() {
+  const items = [];
   document.querySelectorAll('.gsc-result').forEach(r => {
-    let href = '';
-    let title = '';
     const titleA = r.querySelector('.gs-title a');
-    if (titleA) {
-      href  = titleA.getAttribute('data-ctorig') || titleA.href || '';
-      title = titleA.textContent.trim();
-    }
+    if (!titleA) return;
+    const href    = titleA.getAttribute('data-ctorig') || titleA.href || '';
+    const title   = titleA.textContent.trim();
     const snippet = r.querySelector('.gs-snippet')?.textContent?.trim() || '';
     if (href && title && href.startsWith('http')) {
-      // Prevent duplicates by checking if we already grabbed it on a previous page
       items.push({ href, title, snippet });
     }
   });
-
-  document.querySelectorAll('.gs-image, .gsc-thumbnail img, .gs-image-box img').forEach(img => {
-    const src = img.getAttribute('data-src') || img.src || '';
-    const alt = img.alt || img.title || '';
-    if (src && src.startsWith('http')) images.push({ url: src, caption: alt });
-  });
-
-  return { items, images };
+  return items;
 }
 
-// ── Async Auto-Paginator ───────────────────────────────────────
-async function runAutoPaginator() {
-  let compiledItems = [];
-  let compiledImages = [];
-  let currentPageIndex = 1;
+// ── Harvest images from current image tab page ─────────────────
+function harvestImagePage() {
+  const images = [];
+  document.querySelectorAll('img.gs-image.gs-image-scalable').forEach(img => {
+    // src may be lazy — check data-src first, then src
+    const src = img.getAttribute('data-src') || img.src || '';
+    // title attribute is the primary label in GSC image results
+    const caption = img.title || img.alt || '';
+    if (src && src.startsWith('http')) {
+      images.push({ url: src, caption: caption.trim() });
+    }
+  });
+  return images;
+}
 
-  // Helper to wait for network/DOM
-  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+// ── Generic paginator — clicks page N in .gsc-cursor ──────────
+function clickPageNumber(pageIndex) {
+  const container = document.querySelector('.gsc-cursor');
+  if (!container) return false;
+  const pages = Array.from(container.querySelectorAll('.gsc-cursor-page'));
+  const btn = pages.find(p => p.textContent.trim() == pageIndex);
+  if (btn) { btn.click(); return true; }
+  return false;
+}
 
-  // Loop through pages
-  while (currentPageIndex <= MAX_PAGES_TO_CLICK) {
-    // Wait for the current page to finish rendering
-    await sleep(WAIT_TIME_MS); 
+// ── Find and click the image tab ──────────────────────────────
+function clickImageTab() {
+  // Image tab is the INACTIVE tab — active one is the web tab we're already on
+  const tabs = Array.from(document.querySelectorAll('.gsc-tabHeader'));
+  const imageTab = tabs.find(t =>
+    t.classList.contains('gsc-tabhInactive') &&
+    (t.textContent.toLowerCase().includes('image') || t.getAttribute('data-tab')?.toLowerCase().includes('image'))
+  );
+  if (imageTab) { imageTab.click(); return true; }
 
-    const { items, images } = harvestCurrentPage();
-    
-    // Add new unique items to our master lists
+  // Fallback: just click whatever inactive tab exists
+  const anyInactive = tabs.find(t => t.classList.contains('gsc-tabhInactive'));
+  if (anyInactive) { anyInactive.click(); return true; }
+
+  return false;
+}
+
+// ── PHASE 1: Web results with pagination ──────────────────────
+async function runWebPhase() {
+  const compiledItems = [];
+  let pageIndex = 1;
+
+  while (pageIndex <= MAX_WEB_PAGES) {
+    await sleep(PAGE_WAIT_MS);
+
+    const items = harvestWebPage();
     items.forEach(item => {
       if (!compiledItems.find(i => i.href === item.href)) compiledItems.push(item);
     });
+
+    if (compiledItems.length >= TARGET_WEB_RESULTS || items.length === 0) break;
+
+    pageIndex++;
+    const clicked = clickPageNumber(pageIndex);
+    if (!clicked) break;
+  }
+
+  return compiledItems;
+}
+
+// ── PHASE 2: Image tab + image pagination ─────────────────────
+async function runImagePhase() {
+  const compiledImages = [];
+
+  // Switch to image tab
+  const switched = clickImageTab();
+  if (!switched) return compiledImages; // No image tab found, give up gracefully
+
+  // Wait longer — image tab needs time to render its own results
+  await sleep(TAB_SWITCH_WAIT_MS);
+
+  let pageIndex = 1;
+
+  while (pageIndex <= MAX_IMG_PAGES) {
+    const images = harvestImagePage();
     images.forEach(img => {
       if (!compiledImages.find(i => i.url === img.url)) compiledImages.push(img);
     });
 
-    // Check if we hit our target
-    if (compiledItems.length >= TARGET_RESULTS || items.length === 0) {
-      break; 
-    }
+    if (compiledImages.length >= TARGET_IMG_RESULTS || images.length === 0) break;
 
-    // Find the next page button in Google's pagination UI
-    currentPageIndex++;
-    let nextButtonContainer = document.querySelector('.gsc-cursor');
-    
-    if (nextButtonContainer) {
-      // Find the specific page number block (e.g., "2", "3")
-      let pages = Array.from(nextButtonContainer.querySelectorAll('.gsc-cursor-page'));
-      let nextBtn = pages.find(p => p.textContent.trim() == currentPageIndex);
+    pageIndex++;
+    const clicked = clickPageNumber(pageIndex);
+    if (!clicked) break;
 
-      if (nextBtn) {
-        nextBtn.click(); // Programmatically click "Next Page"
-      } else {
-        break; // No more pages exist for this query
-      }
-    } else {
-      break; // Pagination UI didn't load
-    }
+    // Wait for next image page to render
+    await sleep(PAGE_WAIT_MS);
   }
 
-  // --- DONE! Send payload to parent ---
+  return compiledImages;
+}
+
+// ── MAIN ORCHESTRATOR ─────────────────────────────────────────
+async function run() {
+  // Phase 1: scrape web results across pages
+  const items  = await runWebPhase();
+
+  // Phase 2: switch to image tab and scrape image results across pages
+  const images = await runImagePhase();
+
+  // Send everything to parent (Ruminance)
   window.parent.postMessage({
     type:   'cse-results',
     query:  query,
-    items:  compiledItems,
-    images: compiledImages
+    items:  items.slice(0, TARGET_WEB_RESULTS),
+    images: images.slice(0, TARGET_IMG_RESULTS)
   }, '*');
 }
 
-// Start the crawler sequence
 if (query) {
-  setTimeout(runAutoPaginator, 1500); // Give initial page a head start to load
+  // Give the initial CSE widget a head start before we start crawling
+  setTimeout(run, 1500);
 }
 </script>
 
